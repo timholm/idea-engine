@@ -1,0 +1,7 @@
+idea-engine
+*.exe
+specs/
+.env
+*.log
+*.tmp
+.DS_Store

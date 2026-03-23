@@ -1,0 +1,37 @@
+# idea-engine
+
+> Autonomous research agent that turns arXiv papers into monetizable product specs
+
+## Overview
+
+idea-engine discovers promising research from arxiv-archive, gathers deep context (7 related papers + 7 GitHub repos per concept), and synthesizes product specifications via Claude through llm-router. Output specs feed into claude-code-factory for automated building and shipping.
+
+## Architecture
+
+Single Go binary. Four pipeline stages run sequentially:
+
+1. **Discover** — Query arxiv-archive for recent papers, score by citation velocity and commercial potential
+2. **Research** — For each candidate: find 7 similar papers (vector search + citations) and 7 GitHub repos (keyword search + paper-cited URLs)
+3. **Synthesize** — Send full research context to Claude via llm-router, receive structured ProductSpec JSON
+4. **Deliver** — Write specs to factory's specs directory, track in PostgreSQL to prevent duplicates
+
+## API
+
+idea-engine exposes a monitoring HTTP API (`idea-engine serve`):
+
+- `GET /status` — pipeline health and stats
+- `GET /candidates` — list candidates with optional status filter
+- `GET /candidates/{arxivID}` — full candidate detail including research context and spec
+- `GET /specs` — all generated product specs
+- `GET /stats` — aggregate pipeline statistics
+
+## Dependencies
+
+- arxiv-archive (HTTP API) — paper metadata, full text, vector similarity, citation graph
+- llm-router (HTTP API) — all Claude LLM calls
+- GitHub API — repository search, README content, file trees
+- PostgreSQL — candidate state, specs, deduplication
+
+## Source
+
+https://github.com/timholm/idea-engine
