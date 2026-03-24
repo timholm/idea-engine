@@ -60,19 +60,36 @@ type ProductSpec struct {
 	SourceRepos    []string `json:"source_repos"`    // 7 github URLs
 	SourceURL      string   `json:"source_url"`      // primary paper
 	MarketAnalysis string   `json:"market_analysis"` // who pays, why
+
+	// Commercial viability fields
+	BuyerPersona   string   `json:"buyer_persona"`    // exact buyer: job title, company size, industry
+	PricePoint     string   `json:"price_point"`      // e.g. "$49/mo", "$499/yr enterprise"
+	CompetingTools []string `json:"competing_tools"`   // existing solutions this replaces
+
+	// Technical depth fields
+	CoreAlgorithm  string `json:"core_algorithm"`   // specific technique from paper to implement
+	APIDesign      string `json:"api_design"`        // key endpoints, CLI commands, or library API
+
+	// Differentiation fields
+	Differentiation string `json:"differentiation"` // why switch from existing tools to this
+	Moat            string `json:"moat"`             // speed, accuracy, DX, integration, etc.
+
+	// Scope
+	V1Scope string `json:"v1_scope"` // what ships in v1, buildable in one session
 }
 
 // ArchivePaper is the shape returned by the arxiv-archive HTTP API.
 type ArchivePaper struct {
-	ArxivID     string   `json:"arxiv_id"`
-	Title       string   `json:"title"`
-	Abstract    string   `json:"abstract"`
-	Authors     []string `json:"authors"`
-	Categories  []string `json:"categories"`
-	Published   string   `json:"published"`
-	HasFullText bool     `json:"has_full_text"`
-	FullText    string   `json:"full_text,omitempty"`
-	CitedBy     int      `json:"cited_by,omitempty"`
+	ArxivID     string `json:"arxiv_id"`
+	Title       string `json:"title"`
+	Abstract    string `json:"abstract"`
+	Authors     string `json:"authors"`     // comma-separated string
+	Categories  string `json:"categories"`  // space-separated string
+	Published   string `json:"published"`
+	Updated     string `json:"updated,omitempty"`
+	HasFullText bool   `json:"has_full_text"`
+	FullText    string `json:"full_text,omitempty"`
+	FetchedAt   string `json:"fetched_at,omitempty"`
 }
 
 // GitHubSearchResult represents a single GitHub search API result.
