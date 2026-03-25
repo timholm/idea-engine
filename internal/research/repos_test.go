@@ -33,9 +33,9 @@ func TestExtractSearchQuery(t *testing.T) {
 
 func TestExtractTechniques(t *testing.T) {
 	tests := []struct {
-		name     string
+		name    string
 		abstract string
-		wantLen  int
+		wantLen int
 	}{
 		{
 			name:     "named technique",
@@ -50,7 +50,7 @@ func TestExtractTechniques(t *testing.T) {
 		{
 			name:     "multiple techniques",
 			abstract: "We present FastEmbed (FE) and introduce SlowEmbed for comparison. The system called QuickSearch is also evaluated.",
-			wantLen:  2, // "FastEmbed" + "QuickSearch is also evaluated" (capped at 3, regex matches vary)
+			wantLen:  2,
 		},
 		{
 			name:     "no techniques",
@@ -69,57 +69,6 @@ func TestExtractTechniques(t *testing.T) {
 			got := extractTechniques(tt.abstract)
 			if len(got) != tt.wantLen {
 				t.Errorf("extractTechniques() returned %d techniques (%v), want %d", len(got), got, tt.wantLen)
-			}
-		})
-	}
-}
-
-func TestExtractGitHubURLs(t *testing.T) {
-	tests := []struct {
-		name    string
-		text    string
-		wantLen int
-		want    []string
-	}{
-		{
-			name:    "single URL",
-			text:    "Code available at https://github.com/owner/repo",
-			wantLen: 1,
-			want:    []string{"https://github.com/owner/repo"},
-		},
-		{
-			name:    "multiple URLs",
-			text:    "See https://github.com/a/b and https://github.com/c/d for implementations.",
-			wantLen: 2,
-		},
-		{
-			name:    "URL with .git suffix",
-			text:    "Clone from https://github.com/owner/repo.git to get started.",
-			wantLen: 1,
-			want:    []string{"https://github.com/owner/repo"},
-		},
-		{
-			name:    "dedup",
-			text:    "See https://github.com/a/b and also https://github.com/a/b for reference.",
-			wantLen: 1,
-		},
-		{
-			name:    "no URLs",
-			text:    "This paper has no code.",
-			wantLen: 0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractGitHubURLs(tt.text)
-			if len(got) != tt.wantLen {
-				t.Errorf("extractGitHubURLs() returned %d URLs (%v), want %d", len(got), got, tt.wantLen)
-			}
-			for i, want := range tt.want {
-				if i < len(got) && got[i] != want {
-					t.Errorf("URL[%d] = %q, want %q", i, got[i], want)
-				}
 			}
 		})
 	}

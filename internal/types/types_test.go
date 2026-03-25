@@ -7,16 +7,22 @@ import (
 
 func TestProductSpec_JSON(t *testing.T) {
 	spec := ProductSpec{
-		Name:           "code-navigator",
-		Problem:        "Developers waste time navigating large codebases",
-		Solution:       "Semantic code search using paper embeddings",
+		Name:           "inference-forge",
+		Problem:        "Individual inference optimizations work in isolation but don't compose",
+		Solution:       "Fuses 7 techniques: speculative decoding + KV cache compression + continuous batching + quantization + token pruning + prefix caching + structured output",
 		Language:       "Go",
-		Files:          []string{"main.go", "internal/search/search.go"},
-		EstimatedLines: 3000,
-		SourcePapers:   []string{"2603.16514", "2603.12345"},
+		Files:          []string{"main.go", "internal/engine/engine.go"},
+		EstimatedLines: 4000,
+		TechniqueMap: map[string]string{
+			"2603.00001": "Speculative decoding for draft-verify pattern",
+			"2603.00002": "KV cache compression to reduce memory",
+		},
+		SourcePapers:   []string{"2603.00001", "2603.00002", "2603.00003", "2603.00004", "2603.00005", "2603.00006", "2603.00007"},
 		SourceRepos:    []string{"https://github.com/example/repo"},
-		SourceURL:      "https://arxiv.org/abs/2603.16514",
-		MarketAnalysis: "Enterprise dev teams pay $50/seat/month for faster code navigation",
+		ProblemSpace:   "LLM inference optimization",
+		MarketAnalysis: "Platform engineers at Series B-D startups pay $99/mo for unified inference optimization",
+		FactoryIntegration: "Improves llm-router inference throughput by 3x",
+		DeploymentTarget:   "Augments llm-router deployment in factory namespace",
 	}
 
 	data, err := json.Marshal(spec)
@@ -35,22 +41,61 @@ func TestProductSpec_JSON(t *testing.T) {
 	if decoded.EstimatedLines != spec.EstimatedLines {
 		t.Errorf("EstimatedLines = %d, want %d", decoded.EstimatedLines, spec.EstimatedLines)
 	}
-	if len(decoded.SourcePapers) != 2 {
-		t.Errorf("SourcePapers length = %d, want 2", len(decoded.SourcePapers))
+	if len(decoded.SourcePapers) != 7 {
+		t.Errorf("SourcePapers length = %d, want 7", len(decoded.SourcePapers))
 	}
-	if len(decoded.Files) != 2 {
-		t.Errorf("Files length = %d, want 2", len(decoded.Files))
+	if len(decoded.TechniqueMap) != 2 {
+		t.Errorf("TechniqueMap length = %d, want 2", len(decoded.TechniqueMap))
+	}
+	if decoded.ProblemSpace != "LLM inference optimization" {
+		t.Errorf("ProblemSpace = %q, want %q", decoded.ProblemSpace, "LLM inference optimization")
+	}
+	if decoded.FactoryIntegration == "" {
+		t.Error("FactoryIntegration should not be empty")
+	}
+	if decoded.DeploymentTarget == "" {
+		t.Error("DeploymentTarget should not be empty")
 	}
 }
 
-func TestResearchContext_JSON(t *testing.T) {
-	ctx := ResearchContext{
-		Candidate: Candidate{
-			ArxivID: "2603.16514",
-			Title:   "Test Paper",
+func TestPaperCluster_JSON(t *testing.T) {
+	cluster := PaperCluster{
+		ID:           1,
+		ProblemSpace: "LLM inference optimization",
+		PaperIDs:     []string{"2603.00001", "2603.00002", "2603.00003", "2603.00004", "2603.00005", "2603.00006", "2603.00007"},
+		Score:        85.5,
+		Status:       "pending",
+	}
+
+	data, err := json.Marshal(cluster)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded PaperCluster
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.ProblemSpace != "LLM inference optimization" {
+		t.Errorf("ProblemSpace = %q, want %q", decoded.ProblemSpace, "LLM inference optimization")
+	}
+	if len(decoded.PaperIDs) != 7 {
+		t.Errorf("PaperIDs length = %d, want 7", len(decoded.PaperIDs))
+	}
+	if decoded.Score != 85.5 {
+		t.Errorf("Score = %f, want 85.5", decoded.Score)
+	}
+}
+
+func TestFusionResearchContext_JSON(t *testing.T) {
+	ctx := FusionResearchContext{
+		Cluster: PaperCluster{
+			ProblemSpace: "code generation",
+			PaperIDs:     []string{"2603.00001"},
 		},
-		Papers: []PaperSummary{
-			{ArxivID: "2603.11111", Title: "Related 1", Relevance: 0.95},
+		Techniques: []TechniqueSummary{
+			{ArxivID: "2603.00001", Title: "Paper 1", KeyTechnique: "Novel technique X"},
 		},
 		Repos: []RepoSummary{
 			{URL: "https://github.com/test/repo", Name: "test/repo", Stars: 100, Relevance: 0.8},
@@ -62,28 +107,28 @@ func TestResearchContext_JSON(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var decoded ResearchContext
+	var decoded FusionResearchContext
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if decoded.Candidate.ArxivID != "2603.16514" {
-		t.Errorf("Candidate.ArxivID = %q, want %q", decoded.Candidate.ArxivID, "2603.16514")
+	if decoded.Cluster.ProblemSpace != "code generation" {
+		t.Errorf("Cluster.ProblemSpace = %q, want %q", decoded.Cluster.ProblemSpace, "code generation")
 	}
-	if len(decoded.Papers) != 1 {
-		t.Errorf("Papers length = %d, want 1", len(decoded.Papers))
+	if len(decoded.Techniques) != 1 {
+		t.Errorf("Techniques length = %d, want 1", len(decoded.Techniques))
 	}
-	if len(decoded.Repos) != 1 {
-		t.Errorf("Repos length = %d, want 1", len(decoded.Repos))
+	if decoded.Techniques[0].KeyTechnique != "Novel technique X" {
+		t.Errorf("KeyTechnique = %q, want %q", decoded.Techniques[0].KeyTechnique, "Novel technique X")
 	}
 }
 
 func TestStats_JSON(t *testing.T) {
 	stats := Stats{
-		TotalCandidates: 100,
-		Pending:         30,
-		Delivered:       50,
-		AvgScore:        72.5,
+		TotalClusters: 100,
+		Pending:       30,
+		Delivered:     50,
+		AvgScore:      72.5,
 	}
 
 	data, err := json.Marshal(stats)
@@ -96,8 +141,8 @@ func TestStats_JSON(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if decoded.TotalCandidates != 100 {
-		t.Errorf("TotalCandidates = %d, want 100", decoded.TotalCandidates)
+	if decoded.TotalClusters != 100 {
+		t.Errorf("TotalClusters = %d, want 100", decoded.TotalClusters)
 	}
 	if decoded.AvgScore != 72.5 {
 		t.Errorf("AvgScore = %f, want 72.5", decoded.AvgScore)

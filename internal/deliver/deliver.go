@@ -1,4 +1,4 @@
-// Package deliver pushes generated product specs to the factory for building.
+// Package deliver pushes generated fusion product specs to the factory for building.
 package deliver
 
 import (
@@ -31,21 +31,21 @@ func New(cfg *config.Config, database *db.DB) *Deliverer {
 
 // DeliverAll delivers all synthesized specs that haven't been delivered yet.
 func (d *Deliverer) DeliverAll() (int, error) {
-	candidates, err := d.db.GetSynthesizedSpecs(d.cfg.SpecsPerRun)
+	clusters, err := d.db.GetSynthesizedClusters(d.cfg.SpecsPerRun)
 	if err != nil {
-		return 0, fmt.Errorf("fetching synthesized specs: %w", err)
+		return 0, fmt.Errorf("fetching synthesized clusters: %w", err)
 	}
 
-	if len(candidates) == 0 {
+	if len(clusters) == 0 {
 		log.Printf("[deliver] no synthesized specs to deliver")
 		return 0, nil
 	}
 
 	delivered := 0
-	for _, c := range candidates {
+	for _, c := range clusters {
 		var spec types.ProductSpec
 		if err := json.Unmarshal([]byte(c.SpecJSON), &spec); err != nil {
-			log.Printf("[deliver] warning: invalid spec JSON for %s: %v", c.ArxivID, err)
+			log.Printf("[deliver] warning: invalid spec JSON for cluster %d: %v", c.ID, err)
 			continue
 		}
 
@@ -56,8 +56,8 @@ func (d *Deliverer) DeliverAll() (int, error) {
 		}
 		if alreadyShipped {
 			log.Printf("[deliver] skipping %s: already shipped", spec.Name)
-			if err := d.db.MarkSkipped(c.ArxivID); err != nil {
-				log.Printf("[deliver] warning: failed to mark %s as skipped: %v", c.ArxivID, err)
+			if err := d.db.MarkClusterSkipped(c.ID); err != nil {
+				log.Printf("[deliver] warning: failed to mark cluster %d as skipped: %v", c.ID, err)
 			}
 			continue
 		}
@@ -69,20 +69,21 @@ func (d *Deliverer) DeliverAll() (int, error) {
 		}
 
 		// Mark as delivered in the database
-		if err := d.db.MarkDelivered(c.ArxivID); err != nil {
-			log.Printf("[deliver] warning: failed to mark %s as delivered: %v", c.ArxivID, err)
+		if err := d.db.MarkClusterDelivered(c.ID); err != nil {
+			log.Printf("[deliver] warning: failed to mark cluster %d as delivered: %v", c.ID, err)
 		}
 
 		// Record as shipped
-		if err := d.db.RecordShippedIdea(spec.Name, c.ArxivID); err != nil {
+		if err := d.db.RecordShippedIdea(spec.Name, c.ID); err != nil {
 			log.Printf("[deliver] warning: failed to record shipped idea %s: %v", spec.Name, err)
 		}
 
 		delivered++
-		log.Printf("[deliver] delivered: %s (%s)", spec.Name, c.ArxivID)
+		log.Printf("[deliver] delivered fusion product: %s (cluster %d, problem space: %s)",
+			spec.Name, c.ID, c.ProblemSpace)
 	}
 
-	log.Printf("[deliver] delivered %d/%d specs", delivered, len(candidates))
+	log.Printf("[deliver] delivered %d/%d fusion specs", delivered, len(clusters))
 	return delivered, nil
 }
 
@@ -111,7 +112,7 @@ func (d *Deliverer) deliverSpec(spec *types.ProductSpec) error {
 		return fmt.Errorf("writing spec to %s: %w", path, err)
 	}
 
-	log.Printf("[deliver] wrote spec to %s", path)
+	log.Printf("[deliver] wrote fusion spec to %s", path)
 	return nil
 }
 

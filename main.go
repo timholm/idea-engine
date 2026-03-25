@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/timholm/idea-engine/internal/api"
@@ -21,10 +23,13 @@ import (
 func main() {
 	root := &cobra.Command{
 		Use:   "idea-engine",
-		Short: "Autonomous research agent that turns arXiv papers into monetizable product specs",
-		Long: `idea-engine discovers promising research papers from arxiv-archive,
-gathers deep context (7 related papers + 7 GitHub repos per concept),
-and synthesizes monetizable product specifications via Claude through llm-router.
+		Short: "Autonomous research agent that fuses 7 arXiv papers into one product spec",
+		Long: `idea-engine discovers promising research paper CLUSTERS from arxiv-archive,
+groups 7 diverse papers per problem space (each with a different technique),
+and synthesizes FUSION product specifications via Claude.
+
+Each fusion product combines all 7 techniques into one unified tool that is
+more powerful than any individual technique alone.
 
 Output specs are consumed by claude-code-factory to build and ship products.`,
 	}
@@ -45,11 +50,11 @@ Output specs are consumed by claude-code-factory to build and ship products.`,
 	}
 }
 
-// runCmd executes the full pipeline: discover -> research -> synthesize -> deliver.
+// runCmd executes the full pipeline: discover clusters -> research -> synthesize -> deliver.
 func runCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
-		Short: "Full pipeline: discover candidates, research, synthesize specs, deliver to factory",
+		Short: "Full pipeline: discover clusters, research techniques, synthesize fusion specs, deliver",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, database, err := bootstrap()
 			if err != nil {
@@ -57,36 +62,36 @@ func runCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			// Step 1: Discover candidates
-			log.Println("=== Step 1: Discover candidates ===")
+			// Step 1: Discover paper clusters
+			log.Println("=== Step 1: Discover paper clusters ===")
 			disc := discover.New(cfg, database)
-			candidates, err := disc.Run()
+			clusters, err := disc.Run()
 			if err != nil {
 				return fmt.Errorf("discover: %w", err)
 			}
-			log.Printf("Discovered %d candidates", len(candidates))
+			log.Printf("Discovered %d fusion clusters", len(clusters))
 
-			if len(candidates) == 0 {
-				log.Println("No candidates found, exiting")
+			if len(clusters) == 0 {
+				log.Println("No clusters found, exiting")
 				return nil
 			}
 
-			// Step 2: Research each candidate
-			log.Println("=== Step 2: Deep research ===")
+			// Step 2: Research each cluster (extract techniques + find repos)
+			log.Println("=== Step 2: Fusion research ===")
 			res := research.New(cfg, database)
-			contexts := res.ResearchAll(candidates)
-			log.Printf("Researched %d candidates successfully", len(contexts))
+			contexts := res.ResearchAll(clusters)
+			log.Printf("Researched %d clusters successfully", len(contexts))
 
 			if len(contexts) == 0 {
 				log.Println("No research contexts produced, exiting")
 				return nil
 			}
 
-			// Step 3: Synthesize product specs
-			log.Println("=== Step 3: Synthesize product specs ===")
+			// Step 3: Synthesize fusion product specs
+			log.Println("=== Step 3: Synthesize fusion specs ===")
 			syn := synthesize.New(cfg, database)
 			specs := syn.SynthesizeAll(contexts)
-			log.Printf("Synthesized %d product specs", len(specs))
+			log.Printf("Synthesized %d fusion product specs", len(specs))
 
 			// Step 4: Deliver to factory
 			log.Println("=== Step 4: Deliver to factory ===")
@@ -96,19 +101,19 @@ func runCmd() *cobra.Command {
 				return fmt.Errorf("deliver: %w", err)
 			}
 
-			log.Printf("=== Pipeline complete: %d candidates -> %d researched -> %d specs -> %d delivered ===",
-				len(candidates), len(contexts), len(specs), delivered)
+			log.Printf("=== Pipeline complete: %d clusters -> %d researched -> %d specs -> %d delivered ===",
+				len(clusters), len(contexts), len(specs), delivered)
 
 			return nil
 		},
 	}
 }
 
-// discoverCmd finds candidate papers without researching them.
+// discoverCmd finds paper clusters without researching them.
 func discoverCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "discover",
-		Short: "Find candidate papers from arxiv-archive",
+		Short: "Find paper clusters from arxiv-archive (7 diverse papers per problem space)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, database, err := bootstrap()
 			if err != nil {
@@ -117,14 +122,15 @@ func discoverCmd() *cobra.Command {
 			defer database.Close()
 
 			disc := discover.New(cfg, database)
-			candidates, err := disc.Run()
+			clusters, err := disc.Run()
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("Discovered %d candidates:\n\n", len(candidates))
-			for i, c := range candidates {
-				fmt.Printf("  %2d. [%.1f] %s\n      %s\n\n", i+1, c.Score, c.ArxivID, c.Title)
+			fmt.Printf("Discovered %d fusion clusters:\n\n", len(clusters))
+			for i, c := range clusters {
+				fmt.Printf("  %2d. [%.1f] %s\n", i+1, c.Score, c.ProblemSpace)
+				fmt.Printf("      Papers: %v\n\n", c.PaperIDs)
 			}
 
 			return nil
@@ -132,11 +138,11 @@ func discoverCmd() *cobra.Command {
 	}
 }
 
-// researchCmd performs deep research on a single paper.
+// researchCmd performs deep research on a single cluster.
 func researchCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "research <arxiv_id>",
-		Short: "Deep research one paper (7 related papers + 7 repos)",
+		Use:   "research <cluster_id>",
+		Short: "Deep research one cluster (extract techniques from 7 papers + find repos)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, database, err := bootstrap()
@@ -145,24 +151,34 @@ func researchCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			arxivID := args[0]
+			clusterID, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid cluster ID: %w", err)
+			}
+
+			cluster, err := database.GetCluster(clusterID)
+			if err != nil {
+				return fmt.Errorf("cluster %d not found: %w", clusterID, err)
+			}
 
 			res := research.New(cfg, database)
-			ctx, err := res.ResearchCandidate(arxivID)
+			ctx, err := res.ResearchCluster(*cluster)
 			if err != nil {
 				return err
 			}
 
-			fmt.Printf("Research for %s: %s\n\n", ctx.Candidate.ArxivID, ctx.Candidate.Title)
+			fmt.Printf("Fusion Research for: %s\n\n", ctx.Cluster.ProblemSpace)
 
-			fmt.Printf("Related Papers (%d):\n", len(ctx.Papers))
-			for i, p := range ctx.Papers {
-				fmt.Printf("  %d. [%.2f] %s — %s\n", i+1, p.Relevance, p.ArxivID, p.Title)
+			fmt.Printf("Techniques (%d):\n", len(ctx.Techniques))
+			for i, t := range ctx.Techniques {
+				fmt.Printf("  %d. [%s] %s\n     Technique: %s\n\n",
+					i+1, t.ArxivID, t.Title, t.KeyTechnique)
 			}
 
-			fmt.Printf("\nRelated Repos (%d):\n", len(ctx.Repos))
+			fmt.Printf("Related Repos (%d):\n", len(ctx.Repos))
 			for i, r := range ctx.Repos {
-				fmt.Printf("  %d. [%.2f] %s (%d stars) — %s\n", i+1, r.Relevance, r.Name, r.Stars, r.Description)
+				fmt.Printf("  %d. [%.2f] %s (%d stars) — %s\n",
+					i+1, r.Relevance, r.Name, r.Stars, r.Description)
 			}
 
 			return nil
@@ -170,11 +186,11 @@ func researchCmd() *cobra.Command {
 	}
 }
 
-// synthesizeCmd generates a product spec for a single paper.
+// synthesizeCmd generates a fusion product spec for a cluster.
 func synthesizeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "synthesize <arxiv_id>",
-		Short: "Generate a product spec for one paper (requires prior research)",
+		Use:   "synthesize <cluster_id>",
+		Short: "Generate a fusion product spec for one cluster (requires prior research)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, database, err := bootstrap()
@@ -183,33 +199,35 @@ func synthesizeCmd() *cobra.Command {
 			}
 			defer database.Close()
 
-			arxivID := args[0]
-
-			// Check if research exists
-			candidate, err := database.GetCandidate(arxivID)
+			clusterID, err := strconv.Atoi(args[0])
 			if err != nil {
-				return fmt.Errorf("candidate %s not found — run 'idea-engine research %s' first", arxivID, arxivID)
+				return fmt.Errorf("invalid cluster ID: %w", err)
 			}
 
-			if candidate.ResearchJSON == "" {
+			cluster, err := database.GetCluster(clusterID)
+			if err != nil {
+				return fmt.Errorf("cluster %d not found: %w", clusterID, err)
+			}
+
+			if cluster.ResearchJSON == "" {
 				// Need to do research first
-				log.Printf("No cached research for %s, running research first...", arxivID)
+				log.Printf("No cached research for cluster %d, running research first...", clusterID)
 				res := research.New(cfg, database)
-				_, err := res.ResearchCandidate(arxivID)
+				_, err := res.ResearchCluster(*cluster)
 				if err != nil {
 					return fmt.Errorf("research: %w", err)
 				}
 
-				// Reload candidate with research
-				candidate, err = database.GetCandidate(arxivID)
+				// Reload cluster with research
+				cluster, err = database.GetCluster(clusterID)
 				if err != nil {
-					return fmt.Errorf("reloading candidate: %w", err)
+					return fmt.Errorf("reloading cluster: %w", err)
 				}
 			}
 
 			// Parse the cached research context
-			var ctx types.ResearchContext
-			if err := json.Unmarshal([]byte(candidate.ResearchJSON), &ctx); err != nil {
+			var ctx types.FusionResearchContext
+			if err := json.Unmarshal([]byte(cluster.ResearchJSON), &ctx); err != nil {
 				return fmt.Errorf("parsing cached research: %w", err)
 			}
 
@@ -232,7 +250,7 @@ func synthesizeCmd() *cobra.Command {
 func deliverCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "deliver",
-		Short: "Push synthesized specs to the factory",
+		Short: "Push synthesized fusion specs to the factory",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, database, err := bootstrap()
 			if err != nil {
@@ -246,7 +264,7 @@ func deliverCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Printf("Delivered %d specs\n", delivered)
+			fmt.Printf("Delivered %d fusion specs\n", delivered)
 			return nil
 		},
 	}
@@ -256,7 +274,7 @@ func deliverCmd() *cobra.Command {
 func listCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "Show pipeline status (candidates and their states)",
+		Short: "Show pipeline status (clusters and their states)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, database, err := bootstrap()
 			if err != nil {
@@ -267,24 +285,25 @@ func listCmd() *cobra.Command {
 			status, _ := cmd.Flags().GetString("status")
 			limit, _ := cmd.Flags().GetInt("limit")
 
-			candidates, err := database.ListCandidates(status, limit)
+			clusters, err := database.ListClusters(status, limit)
 			if err != nil {
 				return err
 			}
 
-			if len(candidates) == 0 {
-				fmt.Println("No candidates found.")
+			if len(clusters) == 0 {
+				fmt.Println("No clusters found.")
 				return nil
 			}
 
-			fmt.Printf("%-14s %-12s %6s  %s\n", "ARXIV ID", "STATUS", "SCORE", "TITLE")
-			fmt.Println("─────────────────────────────────────────────────────────────────────────────")
-			for _, c := range candidates {
-				title := c.Title
-				if len(title) > 50 {
-					title = title[:47] + "..."
+			fmt.Printf("%-4s %-12s %6s  %-30s  %s\n", "ID", "STATUS", "SCORE", "PROBLEM SPACE", "PAPERS")
+			fmt.Println(strings.Repeat("-", 90))
+			for _, c := range clusters {
+				space := c.ProblemSpace
+				if len(space) > 30 {
+					space = space[:27] + "..."
 				}
-				fmt.Printf("%-14s %-12s %6.1f  %s\n", c.ArxivID, c.Status, c.Score, title)
+				papers := fmt.Sprintf("%d papers", len(c.PaperIDs))
+				fmt.Printf("%-4d %-12s %6.1f  %-30s  %s\n", c.ID, c.Status, c.Score, space, papers)
 			}
 
 			return nil
@@ -292,7 +311,7 @@ func listCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringP("status", "s", "", "Filter by status (pending, researching, synthesized, delivered, skipped)")
-	cmd.Flags().IntP("limit", "n", 50, "Maximum number of candidates to show")
+	cmd.Flags().IntP("limit", "n", 50, "Maximum number of clusters to show")
 
 	return cmd
 }
@@ -314,9 +333,9 @@ func statsCmd() *cobra.Command {
 				return err
 			}
 
-			fmt.Println("idea-engine pipeline statistics")
-			fmt.Println("───────────────────────────────")
-			fmt.Printf("Total candidates:  %d\n", stats.TotalCandidates)
+			fmt.Println("idea-engine fusion pipeline statistics")
+			fmt.Println(strings.Repeat("-", 40))
+			fmt.Printf("Total clusters:    %d\n", stats.TotalClusters)
 			fmt.Printf("  Pending:         %d\n", stats.Pending)
 			fmt.Printf("  Researching:     %d\n", stats.Researching)
 			fmt.Printf("  Synthesized:     %d\n", stats.Synthesized)
@@ -325,8 +344,8 @@ func statsCmd() *cobra.Command {
 			fmt.Printf("Shipped ideas:     %d\n", stats.ShippedIdeas)
 			fmt.Printf("Average score:     %.1f\n", stats.AvgScore)
 
-			if stats.TotalCandidates > 0 {
-				successRate := float64(stats.Delivered) / float64(stats.TotalCandidates) * 100
+			if stats.TotalClusters > 0 {
+				successRate := float64(stats.Delivered) / float64(stats.TotalClusters) * 100
 				fmt.Printf("Success rate:      %.1f%%\n", successRate)
 			}
 
@@ -350,8 +369,8 @@ func serveCmd() *cobra.Command {
 			addr, _ := cmd.Flags().GetString("addr")
 
 			srv := api.New(database)
-			log.Printf("Starting idea-engine API on %s", addr)
-			log.Printf("Endpoints: GET /status, GET /candidates, GET /specs, GET /stats")
+			log.Printf("Starting idea-engine fusion API on %s", addr)
+			log.Printf("Endpoints: GET /status, GET /clusters, GET /specs, GET /stats")
 			return http.ListenAndServe(addr, srv.Handler())
 		},
 	}

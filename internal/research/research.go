@@ -1,6 +1,7 @@
 package research
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -9,7 +10,7 @@ import (
 	"github.com/timholm/idea-engine/internal/types"
 )
 
-// Researcher orchestrates paper + repo research for candidates.
+// Researcher orchestrates technique extraction + repo research for paper clusters.
 type Researcher struct {
 	cfg    *config.Config
 	db     *db.DB
@@ -27,84 +28,78 @@ func New(cfg *config.Config, database *db.DB) *Researcher {
 	}
 }
 
-// ResearchCandidate performs deep research on a single candidate paper.
-// Returns the full research context (candidate + 7 papers + 7 repos).
-func (r *Researcher) ResearchCandidate(arxivID string) (*types.ResearchContext, error) {
-	log.Printf("[research] starting deep research for %s", arxivID)
+// ResearchCluster performs deep research on a paper cluster.
+// Extracts the key technique from each of the 7 papers and finds related repos
+// for the problem space. No "find similar papers" step — papers are already diverse.
+func (r *Researcher) ResearchCluster(cluster types.PaperCluster) (*types.FusionResearchContext, error) {
+	log.Printf("[research] starting fusion research for cluster '%s' (%d papers)",
+		cluster.ProblemSpace, len(cluster.Papers))
 
 	// Update status to researching
-	if err := r.db.UpdateStatus(arxivID, "researching"); err != nil {
+	if err := r.db.UpdateClusterStatus(cluster.ID, "researching"); err != nil {
 		return nil, fmt.Errorf("updating status: %w", err)
 	}
 
-	// Fetch the full paper from archive
-	paper, err := r.papers.FetchFullPaper(arxivID)
+	// Step 1: Extract key technique from each paper
+	techniques, err := r.papers.ExtractTechniques(cluster.Papers)
 	if err != nil {
-		return nil, fmt.Errorf("fetching paper %s: %w", arxivID, err)
+		log.Printf("[research] warning: technique extraction failed for cluster '%s': %v",
+			cluster.ProblemSpace, err)
+		techniques = nil
 	}
 
-	candidate := types.Candidate{
-		ArxivID:  paper.ArxivID,
-		Title:    paper.Title,
-		Abstract: paper.Abstract,
-		FullText: paper.FullText,
-	}
-
-	// Find 7 related papers
-	relatedPapers, err := r.papers.FindRelatedPapers(arxivID)
+	// Step 2: Find repos related to the problem space (not one paper)
+	relatedRepos, err := r.repos.FindRelatedRepos(cluster.ProblemSpace, techniques)
 	if err != nil {
-		log.Printf("[research] warning: paper research failed for %s: %v", arxivID, err)
-		relatedPapers = nil // continue with whatever we have
-	}
-
-	// Find 7 related repos
-	relatedRepos, err := r.repos.FindRelatedRepos(paper.Title, paper.Abstract, paper.FullText)
-	if err != nil {
-		log.Printf("[research] warning: repo research failed for %s: %v", arxivID, err)
+		log.Printf("[research] warning: repo research failed for cluster '%s': %v",
+			cluster.ProblemSpace, err)
 		relatedRepos = nil
 	}
 
 	// Must have at least some research to be useful
-	if len(relatedPapers) == 0 && len(relatedRepos) == 0 {
-		if err := r.db.MarkSkipped(arxivID); err != nil {
-			log.Printf("[research] warning: failed to mark %s as skipped: %v", arxivID, err)
+	if len(techniques) == 0 && len(relatedRepos) == 0 {
+		if err := r.db.MarkClusterSkipped(cluster.ID); err != nil {
+			log.Printf("[research] warning: failed to mark cluster %d as skipped: %v", cluster.ID, err)
 		}
-		return nil, fmt.Errorf("no related papers or repos found for %s", arxivID)
+		return nil, fmt.Errorf("no techniques or repos found for cluster '%s'", cluster.ProblemSpace)
 	}
 
-	ctx := &types.ResearchContext{
-		Candidate: candidate,
-		Papers:    relatedPapers,
-		Repos:     relatedRepos,
+	ctx := &types.FusionResearchContext{
+		Cluster:    cluster,
+		Techniques: techniques,
+		Repos:      relatedRepos,
 	}
 
 	// Cache the research context in the database
-	if err := r.db.SaveResearch(arxivID, ctx); err != nil {
-		log.Printf("[research] warning: failed to cache research for %s: %v", arxivID, err)
+	data, err := json.Marshal(ctx)
+	if err == nil {
+		if err := r.db.SaveClusterResearch(cluster.ID, string(data)); err != nil {
+			log.Printf("[research] warning: failed to cache research for cluster %d: %v", cluster.ID, err)
+		}
 	}
 
-	log.Printf("[research] completed research for %s: %d papers, %d repos",
-		arxivID, len(relatedPapers), len(relatedRepos))
+	log.Printf("[research] completed research for cluster '%s': %d techniques, %d repos",
+		cluster.ProblemSpace, len(techniques), len(relatedRepos))
 
 	return ctx, nil
 }
 
-// ResearchAll performs deep research on a batch of candidates.
+// ResearchAll performs deep research on a batch of paper clusters.
 // Returns the successfully researched contexts.
-func (r *Researcher) ResearchAll(candidates []types.Candidate) []*types.ResearchContext {
-	var results []*types.ResearchContext
+func (r *Researcher) ResearchAll(clusters []types.PaperCluster) []*types.FusionResearchContext {
+	var results []*types.FusionResearchContext
 
-	for i, c := range candidates {
-		log.Printf("[research] processing candidate %d/%d: %s", i+1, len(candidates), c.ArxivID)
+	for i, c := range clusters {
+		log.Printf("[research] processing cluster %d/%d: '%s'", i+1, len(clusters), c.ProblemSpace)
 
-		ctx, err := r.ResearchCandidate(c.ArxivID)
+		ctx, err := r.ResearchCluster(c)
 		if err != nil {
-			log.Printf("[research] skipping %s: %v", c.ArxivID, err)
+			log.Printf("[research] skipping cluster '%s': %v", c.ProblemSpace, err)
 			continue
 		}
 		results = append(results, ctx)
 	}
 
-	log.Printf("[research] completed %d/%d candidates successfully", len(results), len(candidates))
+	log.Printf("[research] completed %d/%d clusters successfully", len(results), len(clusters))
 	return results
 }

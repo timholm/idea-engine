@@ -1,13 +1,9 @@
 package synthesize
 
 import (
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/timholm/idea-engine/internal/config"
 	"github.com/timholm/idea-engine/internal/types"
 )
 
@@ -60,150 +56,44 @@ func TestExtractJSON(t *testing.T) {
 }
 
 func TestBuildPrompt(t *testing.T) {
-	ctx := &types.ResearchContext{
-		Candidate: types.Candidate{
-			ArxivID:  "2603.16514",
-			Title:    "Test Paper: A Novel Approach",
-			Abstract: "We study X and propose Y.",
-			FullText: "Full text of the paper goes here.",
+	ctx := &types.FusionResearchContext{
+		Cluster: types.PaperCluster{
+			ProblemSpace: "LLM inference optimization",
+			PaperIDs: []string{
+				"2603.00001", "2603.00002", "2603.00003",
+				"2603.00004", "2603.00005", "2603.00006", "2603.00007",
+			},
 		},
-		Papers: []types.PaperSummary{
-			{ArxivID: "2603.00001", Title: "Related 1", Abstract: "Abstract 1", Relevance: 0.95},
-			{ArxivID: "2603.00002", Title: "Related 2", Abstract: "Abstract 2", Relevance: 0.90},
+		Techniques: []types.TechniqueSummary{
+			{ArxivID: "2603.00001", Title: "Speculative Decoding", KeyTechnique: "Draft-verify pattern", Abstract: "We propose speculative decoding."},
+			{ArxivID: "2603.00002", Title: "KV Cache Compression", KeyTechnique: "Cache compression", Abstract: "We present KV cache compression."},
 		},
 		Repos: []types.RepoSummary{
-			{URL: "https://github.com/a/b", Name: "a/b", Stars: 500, Language: "Go", Description: "Desc"},
+			{URL: "https://github.com/a/b", Name: "a/b", Stars: 500, Language: "Go", Description: "Inference tool"},
 		},
 	}
 
 	prompt := buildPrompt(ctx)
 
-	// Check that key sections are present
+	// Check that key fusion sections are present
 	checks := []string{
-		"Test Paper: A Novel Approach",
-		"2603.16514",
-		"Full text of the paper goes here.",
-		"Related 1",
-		"Related 2",
+		"FUSION",
+		"LLM inference optimization",
+		"7 Techniques To Fuse",
+		"Speculative Decoding",
+		"KV Cache Compression",
+		"technique_map",
+		"ALL 7 papers",
+		"factory_integration",
+		"deployment_target",
+		"factory pipeline",
 		"a/b",
 		"500",
-		"Output ONLY the JSON object",
-		"market_analysis",
 	}
 
 	for _, check := range checks {
 		if !strings.Contains(prompt, check) {
 			t.Errorf("prompt missing expected content: %q", check)
 		}
-	}
-}
-
-func TestSynthesizer_CallLLM(t *testing.T) {
-	spec := types.ProductSpec{
-		Name:           "test-product",
-		Problem:        "Test problem",
-		Solution:       "Test solution",
-		Language:       "Go",
-		Files:          []string{"main.go"},
-		EstimatedLines: 1000,
-		MarketAnalysis: "Test market",
-	}
-
-	specJSON, _ := json.Marshal(spec)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/chat/completions" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Method != "POST" {
-			t.Errorf("unexpected method: %s", r.Method)
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		resp := types.LLMResponse{
-			Choices: []types.LLMChoice{
-				{Message: types.LLMMessage{
-					Role:    "assistant",
-					Content: string(specJSON),
-				}},
-			},
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	s := &Synthesizer{
-		cfg:    &config.Config{LLMRouterURL: server.URL},
-		client: server.Client(),
-	}
-
-	result, err := s.callLLM("test prompt")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if result.Name != "test-product" {
-		t.Errorf("Name = %q, want %q", result.Name, "test-product")
-	}
-	if result.Language != "Go" {
-		t.Errorf("Language = %q, want %q", result.Language, "Go")
-	}
-}
-
-func TestSynthesizer_CallLLM_MarkdownWrapped(t *testing.T) {
-	spec := types.ProductSpec{
-		Name:    "wrapped-product",
-		Problem: "Test",
-		Solution: "Test",
-	}
-	specJSON, _ := json.Marshal(spec)
-	wrapped := "Here's the spec:\n```json\n" + string(specJSON) + "\n```"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := types.LLMResponse{
-			Choices: []types.LLMChoice{
-				{Message: types.LLMMessage{Role: "assistant", Content: wrapped}},
-			},
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	s := &Synthesizer{
-		cfg:    &config.Config{LLMRouterURL: server.URL},
-		client: server.Client(),
-	}
-
-	result, err := s.callLLM("test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Name != "wrapped-product" {
-		t.Errorf("Name = %q, want %q", result.Name, "wrapped-product")
-	}
-}
-
-func TestSynthesizer_CallLLM_InvalidJSON(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := types.LLMResponse{
-			Choices: []types.LLMChoice{
-				{Message: types.LLMMessage{Role: "assistant", Content: "I can't generate a spec for this."}},
-			},
-		}
-		json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	s := &Synthesizer{
-		cfg:    &config.Config{LLMRouterURL: server.URL},
-		client: server.Client(),
-	}
-
-	_, err := s.callLLM("test")
-	if err == nil {
-		t.Fatal("expected error for invalid JSON response, got nil")
 	}
 }

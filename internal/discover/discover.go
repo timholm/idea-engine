@@ -1,4 +1,6 @@
-// Package discover queries arxiv-archive to find candidate papers with product potential.
+// Package discover queries arxiv-archive to find paper clusters for fusion products.
+// Instead of individual candidates, it finds PROBLEM SPACES and groups 7 diverse papers
+// into each cluster — papers that tackle the same problem with different techniques.
 package discover
 
 import (
@@ -18,24 +20,27 @@ import (
 	"github.com/timholm/idea-engine/internal/types"
 )
 
-// trendingTopics are high-signal search queries for finding commercially viable research.
-var trendingTopics = []string{
-	"code generation LLM",
+// problemSpaces are high-signal problem domains with commercial potential.
+// Each maps to a search query for arxiv-archive.
+var problemSpaces = []string{
+	"LLM inference optimization",
+	"code generation and synthesis",
 	"retrieval augmented generation",
-	"autonomous agents",
-	"multimodal reasoning",
-	"efficient inference",
-	"tool use language model",
-	"embedding model fine-tuning",
-	"knowledge graph construction",
-	"anomaly detection transformer",
-	"federated learning privacy",
+	"AI agent orchestration",
+	"code security and vulnerability detection",
+	"automated testing and fuzzing",
+	"embeddings and vector search",
+	"model compression and quantization",
+	"prompt engineering and optimization",
+	"data pipeline and ETL automation",
 }
 
 // categories to query for recent papers.
 var categories = []string{"cs.AI", "cs.CL", "cs.LG", "cs.SE", "cs.CV", "stat.ML"}
 
-// Discoverer finds candidate papers from the arxiv-archive API.
+const clusterSize = 7 // exactly 7 papers per fusion cluster
+
+// Discoverer finds paper clusters from the arxiv-archive API.
 type Discoverer struct {
 	cfg    *config.Config
 	db     *db.DB
@@ -48,14 +53,14 @@ func New(cfg *config.Config, database *db.DB) *Discoverer {
 		cfg: cfg,
 		db:  database,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 180 * time.Second,
 		},
 	}
 }
 
-// Run discovers candidate papers: queries recent papers and trending topics,
-// scores them, and returns the top N candidates.
-func (d *Discoverer) Run() ([]types.Candidate, error) {
+// Run discovers paper clusters: fetches recent papers, groups them by problem space,
+// picks the 7 most diverse papers per space, and returns scored clusters.
+func (d *Discoverer) Run() ([]types.PaperCluster, error) {
 	seen := make(map[string]bool)
 	var allPapers []types.ArchivePaper
 
@@ -74,11 +79,11 @@ func (d *Discoverer) Run() ([]types.Candidate, error) {
 		}
 	}
 
-	// Step 2: Trending topic searches
-	for _, topic := range trendingTopics {
-		papers, err := d.searchPapers(topic)
+	// Step 2: Problem space searches — find papers for each target domain
+	for _, space := range problemSpaces {
+		papers, err := d.searchPapers(space)
 		if err != nil {
-			log.Printf("[discover] warning: failed to search '%s': %v", topic, err)
+			log.Printf("[discover] warning: failed to search '%s': %v", space, err)
 			continue
 		}
 		for _, p := range papers {
@@ -91,28 +96,36 @@ func (d *Discoverer) Run() ([]types.Candidate, error) {
 
 	log.Printf("[discover] found %d unique papers from archive", len(allPapers))
 
-	// Step 3: Filter and score
-	candidates := d.filterAndScore(allPapers)
+	// Step 3: Filter to recent, relevant papers
+	filtered := d.filterPapers(allPapers)
+	log.Printf("[discover] %d papers pass quality filters", len(filtered))
 
-	// Step 4: Take top N
-	limit := d.cfg.CandidatesPerRun
-	if len(candidates) < limit {
-		limit = len(candidates)
+	if len(filtered) < clusterSize {
+		return nil, fmt.Errorf("only %d papers pass filters, need at least %d for a cluster", len(filtered), clusterSize)
 	}
-	candidates = candidates[:limit]
 
-	// Step 5: Persist to database
-	for i := range candidates {
-		id, err := d.db.InsertCandidate(candidates[i].ArxivID, candidates[i].Title, candidates[i].Score)
+	// Step 4: Cluster papers into problem spaces by keyword similarity
+	clusters := d.buildClusters(filtered)
+
+	// Step 5: Take top N clusters
+	limit := d.cfg.CandidatesPerRun
+	if limit > len(clusters) {
+		limit = len(clusters)
+	}
+	clusters = clusters[:limit]
+
+	// Step 6: Persist clusters to database
+	for i := range clusters {
+		id, err := d.db.InsertCluster(clusters[i].ProblemSpace, clusters[i].PaperIDs, clusters[i].Score)
 		if err != nil {
-			log.Printf("[discover] warning: failed to insert candidate %s: %v", candidates[i].ArxivID, err)
+			log.Printf("[discover] warning: failed to insert cluster '%s': %v", clusters[i].ProblemSpace, err)
 			continue
 		}
-		candidates[i].ID = id
+		clusters[i].ID = id
 	}
 
-	log.Printf("[discover] selected %d candidates for research", len(candidates))
-	return candidates, nil
+	log.Printf("[discover] built %d fusion clusters for research", len(clusters))
+	return clusters, nil
 }
 
 func (d *Discoverer) fetchRecent(category string, days int) ([]types.ArchivePaper, error) {
@@ -137,20 +150,44 @@ func (d *Discoverer) fetchPapers(endpoint string) ([]types.ArchivePaper, error) 
 		return nil, fmt.Errorf("GET %s returned %d: %s", endpoint, resp.StatusCode, string(body))
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response from %s: %w", endpoint, err)
+	}
+
+	// Try bare array first.
 	var papers []types.ArchivePaper
-	if err := json.NewDecoder(resp.Body).Decode(&papers); err != nil {
+	if err := json.Unmarshal(body, &papers); err == nil {
+		return papers, nil
+	}
+
+	// Try wrapped format: {"papers": [...], "count": N, ...}
+	var wrapped struct {
+		Papers  []types.ArchivePaper `json:"papers"`
+		Refs    []types.ArchivePaper `json:"refs"`
+		CitedBy []types.ArchivePaper `json:"cited_by"`
+	}
+	if err := json.Unmarshal(body, &wrapped); err != nil {
 		return nil, fmt.Errorf("decoding response from %s: %w", endpoint, err)
 	}
-	return papers, nil
+	if len(wrapped.Papers) > 0 {
+		return wrapped.Papers, nil
+	}
+	if len(wrapped.Refs) > 0 {
+		return wrapped.Refs, nil
+	}
+	if len(wrapped.CitedBy) > 0 {
+		return wrapped.CitedBy, nil
+	}
+	return nil, nil
 }
 
-// filterAndScore applies quality filters and scores each paper.
-func (d *Discoverer) filterAndScore(papers []types.ArchivePaper) []types.Candidate {
+// filterPapers applies quality filters: recent, has abstract, relevant category.
+func (d *Discoverer) filterPapers(papers []types.ArchivePaper) []types.ArchivePaper {
 	cutoff := time.Now().AddDate(0, 0, -30)
-	var candidates []types.Candidate
+	var result []types.ArchivePaper
 
 	for _, p := range papers {
-		// Filter: must have published date within last 30 days
 		pub, err := time.Parse(time.RFC3339, p.Published)
 		if err != nil {
 			pub, err = time.Parse("2006-01-02", p.Published)
@@ -161,96 +198,255 @@ func (d *Discoverer) filterAndScore(papers []types.ArchivePaper) []types.Candida
 		if pub.Before(cutoff) {
 			continue
 		}
-
-		// Filter: must have full text available
-		if !p.HasFullText {
+		if p.Abstract == "" {
 			continue
 		}
-
-		// Filter: must be in a relevant CS/AI category
-		if !hasRelevantCategory(p.Categories) {
+		cats := strings.Fields(p.Categories)
+		if !hasRelevantCategory(cats) {
 			continue
 		}
+		result = append(result, p)
+	}
+	return result
+}
 
-		score := scoreCandidate(p, pub)
+// paperWithKeywords annotates a paper with extracted technique keywords.
+type paperWithKeywords struct {
+	paper    types.ArchivePaper
+	keywords map[string]bool
+	category string // primary category
+}
 
-		candidates = append(candidates, types.Candidate{
-			ArxivID:    p.ArxivID,
-			Title:      p.Title,
-			Abstract:   p.Abstract,
-			Categories: p.Categories,
-			Published:  pub,
-			Score:      score,
-			Status:     "pending",
+// buildClusters groups papers into problem spaces and picks the 7 most diverse per space.
+func (d *Discoverer) buildClusters(papers []types.ArchivePaper) []types.PaperCluster {
+	// Step 1: Extract technique keywords from each paper title + abstract
+	var annotated []paperWithKeywords
+	for _, p := range papers {
+		kw := extractTechniqueKeywords(p.Title, p.Abstract)
+		cats := strings.Fields(p.Categories)
+		primary := ""
+		if len(cats) > 0 {
+			primary = cats[0]
+		}
+		annotated = append(annotated, paperWithKeywords{
+			paper:    p,
+			keywords: kw,
+			category: primary,
 		})
 	}
 
-	// Sort by score descending
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Score > candidates[j].Score
+	// Step 2: Group papers by problem space
+	// A paper belongs to a problem space if its title/abstract contains matching keywords
+	spaceKeywords := map[string][]string{
+		"LLM inference optimization":             {"inference", "decoding", "latency", "throughput", "serving", "kv cache", "quantization", "pruning", "batching", "speculative", "compression"},
+		"code generation and synthesis":           {"code generation", "program synthesis", "code completion", "code repair", "code translation", "programming", "software engineering", "code edit"},
+		"retrieval augmented generation":          {"retrieval", "rag", "knowledge base", "context window", "document", "embedding", "vector search", "semantic search"},
+		"AI agent orchestration":                  {"agent", "multi-agent", "tool use", "planning", "reasoning", "chain of thought", "workflow", "orchestration", "function calling"},
+		"code security and vulnerability":         {"vulnerability", "security", "malware", "exploit", "fuzzing", "static analysis", "bug detection", "code review", "patch"},
+		"automated testing":                       {"testing", "test generation", "fuzzing", "mutation", "coverage", "verification", "validation", "debugging"},
+		"embeddings and vector search":            {"embedding", "representation", "similarity", "clustering", "dimensionality", "contrastive", "vector", "dense retrieval"},
+		"model compression and efficiency":        {"distillation", "pruning", "quantization", "compression", "efficient", "lightweight", "mobile", "edge", "small model"},
+		"prompt engineering and optimization":     {"prompt", "instruction", "alignment", "tuning", "few-shot", "in-context learning", "chain of thought"},
+		"data pipeline and ML ops":                {"pipeline", "data", "feature", "monitoring", "drift", "deployment", "mlops", "training", "preprocessing"},
+	}
+
+	type spaceGroup struct {
+		name   string
+		papers []paperWithKeywords
+	}
+
+	var groups []spaceGroup
+	for space, keywords := range spaceKeywords {
+		var matched []paperWithKeywords
+		for _, pw := range annotated {
+			titleAbstract := strings.ToLower(pw.paper.Title + " " + pw.paper.Abstract)
+			matchCount := 0
+			for _, kw := range keywords {
+				if strings.Contains(titleAbstract, kw) {
+					matchCount++
+				}
+			}
+			if matchCount >= 2 { // must match at least 2 keywords for the space
+				matched = append(matched, pw)
+			}
+		}
+		if len(matched) >= clusterSize {
+			groups = append(groups, spaceGroup{name: space, papers: matched})
+		}
+	}
+
+	// Step 3: For each problem space, pick the 7 most DIVERSE papers
+	var clusters []types.PaperCluster
+	for _, group := range groups {
+		diverse := pickDiversePapers(group.papers, clusterSize)
+		if len(diverse) < clusterSize {
+			continue
+		}
+
+		var paperIDs []string
+		var clusterPapers []types.ArchivePaper
+		for _, pw := range diverse {
+			paperIDs = append(paperIDs, pw.paper.ArxivID)
+			clusterPapers = append(clusterPapers, pw.paper)
+		}
+
+		score := scoreCluster(group.name, diverse)
+
+		clusters = append(clusters, types.PaperCluster{
+			ProblemSpace: group.name,
+			Papers:       clusterPapers,
+			PaperIDs:     paperIDs,
+			Score:        score,
+			Status:       "pending",
+		})
+	}
+
+	// Sort clusters by score descending
+	sort.Slice(clusters, func(i, j int) bool {
+		return clusters[i].Score > clusters[j].Score
 	})
 
-	return candidates
+	return clusters
 }
 
-// scoreCandidate calculates a commercial potential score (0-100) for a paper.
-func scoreCandidate(p types.ArchivePaper, published time.Time) float64 {
+// pickDiversePapers selects N papers with maximum keyword diversity.
+// Uses a greedy algorithm: always pick the paper whose keywords overlap
+// LEAST with the keywords already selected.
+func pickDiversePapers(papers []paperWithKeywords, n int) []paperWithKeywords {
+	if len(papers) <= n {
+		return papers
+	}
+
+	// Start with the paper that has the most unique keywords (richest technique)
+	best := 0
+	bestCount := 0
+	for i, pw := range papers {
+		if len(pw.keywords) > bestCount {
+			bestCount = len(pw.keywords)
+			best = i
+		}
+	}
+
+	selected := []paperWithKeywords{papers[best]}
+	usedKeywords := make(map[string]bool)
+	for kw := range papers[best].keywords {
+		usedKeywords[kw] = true
+	}
+	used := map[int]bool{best: true}
+
+	for len(selected) < n {
+		bestIdx := -1
+		bestNewKeywords := -1
+
+		for i, pw := range papers {
+			if used[i] {
+				continue
+			}
+			// Count how many NEW keywords this paper brings
+			newKW := 0
+			for kw := range pw.keywords {
+				if !usedKeywords[kw] {
+					newKW++
+				}
+			}
+			if newKW > bestNewKeywords {
+				bestNewKeywords = newKW
+				bestIdx = i
+			}
+		}
+
+		if bestIdx < 0 {
+			break
+		}
+
+		selected = append(selected, papers[bestIdx])
+		used[bestIdx] = true
+		for kw := range papers[bestIdx].keywords {
+			usedKeywords[kw] = true
+		}
+	}
+
+	return selected
+}
+
+// extractTechniqueKeywords extracts technique-related keywords from title and abstract.
+func extractTechniqueKeywords(title, abstract string) map[string]bool {
+	text := strings.ToLower(title + " " + abstract)
+	keywords := make(map[string]bool)
+
+	// Technique-indicating words
+	techniqueWords := []string{
+		"attention", "transformer", "convolution", "diffusion", "reinforcement",
+		"contrastive", "generative", "discriminative", "autoregressive", "masked",
+		"retrieval", "embedding", "quantization", "pruning", "distillation",
+		"fine-tuning", "pretraining", "few-shot", "zero-shot", "in-context",
+		"agent", "planning", "reasoning", "chain-of-thought", "tool-use",
+		"speculative", "batching", "caching", "streaming", "parallel",
+		"graph", "tree", "sequence", "hierarchical", "recursive",
+		"adversarial", "robust", "calibration", "uncertainty",
+		"federated", "distributed", "compression", "sparse",
+		"multimodal", "vision-language", "cross-modal",
+		"code generation", "program synthesis", "code repair",
+		"vulnerability", "fuzzing", "testing", "verification",
+		"search", "ranking", "recommendation", "clustering",
+		"tokenization", "parsing", "grammar", "syntax",
+		"knowledge graph", "ontology", "schema",
+		"alignment", "rlhf", "dpo", "preference",
+		"mixture of experts", "moe", "routing",
+		"flash attention", "linear attention", "sparse attention",
+		"lora", "adapter", "prefix tuning",
+		"rag", "dense retrieval", "sparse retrieval",
+		"benchmark", "evaluation", "metric",
+		"optimization", "scheduler", "curriculum",
+		"data augmentation", "synthetic data",
+		"structured output", "constrained decoding",
+		"prefix caching", "kv cache", "memory",
+		"token pruning", "early exit",
+	}
+
+	for _, tw := range techniqueWords {
+		if strings.Contains(text, tw) {
+			keywords[tw] = true
+		}
+	}
+
+	return keywords
+}
+
+// scoreCluster scores a problem space cluster by commercial potential.
+func scoreCluster(spaceName string, papers []paperWithKeywords) float64 {
 	score := 0.0
 
-	// Citation velocity: more citations relative to age = higher score
-	daysSincePublished := math.Max(1, time.Since(published).Hours()/24)
-	citationVelocity := float64(p.CitedBy) / daysSincePublished
-	score += math.Min(30, citationVelocity*10)
-
-	// Recency bonus: newer papers get a boost
-	if daysSincePublished <= 7 {
-		score += 20
-	} else if daysSincePublished <= 14 {
-		score += 10
-	} else if daysSincePublished <= 21 {
-		score += 5
-	}
-
-	// Category relevance: cs.SE and cs.CL papers tend to produce better products
-	for _, cat := range p.Categories {
-		switch cat {
-		case "cs.SE":
-			score += 15 // software engineering = directly buildable
-		case "cs.CL":
-			score += 12 // NLP/LLM = high commercial demand
-		case "cs.AI":
-			score += 10
-		case "cs.LG":
-			score += 8
-		case "cs.CV":
-			score += 5
+	// Diversity bonus: count unique keywords across all 7 papers
+	allKeywords := make(map[string]bool)
+	for _, pw := range papers {
+		for kw := range pw.keywords {
+			allKeywords[kw] = true
 		}
 	}
+	// More diverse techniques = higher score
+	score += math.Min(40, float64(len(allKeywords))*2)
 
-	// Novelty signal: title keywords that suggest new techniques
-	titleLower := strings.ToLower(p.Title)
-	noveltyKeywords := []string{
-		"novel", "new approach", "state-of-the-art", "outperforms",
-		"efficient", "lightweight", "scalable", "real-time",
-		"framework", "system", "tool", "benchmark",
-	}
-	for _, kw := range noveltyKeywords {
-		if strings.Contains(titleLower, kw) {
-			score += 3
-			break
+	// Recency bonus: average recency of papers
+	recentCount := 0
+	for _, pw := range papers {
+		pub, err := time.Parse(time.RFC3339, pw.paper.Published)
+		if err != nil {
+			pub, _ = time.Parse("2006-01-02", pw.paper.Published)
+		}
+		if time.Since(pub).Hours()/24 <= 7 {
+			recentCount++
 		}
 	}
+	score += float64(recentCount) * 5
 
-	// Product signal: title suggests something buildable
-	productKeywords := []string{
-		"agent", "code", "programming", "api", "search",
-		"retrieval", "generation", "detection", "monitoring",
-		"optimization", "pipeline", "automated", "autonomous",
+	// Category relevance bonus
+	catBonus := map[string]float64{
+		"cs.SE": 3, "cs.CL": 2.5, "cs.AI": 2, "cs.LG": 1.5, "cs.CV": 1,
 	}
-	for _, kw := range productKeywords {
-		if strings.Contains(titleLower, kw) {
-			score += 5
-			break
+	for _, pw := range papers {
+		if bonus, ok := catBonus[pw.category]; ok {
+			score += bonus
 		}
 	}
 

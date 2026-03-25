@@ -46,24 +46,24 @@ func (db *DB) Close() error {
 
 func (db *DB) ensureSchema() error {
 	schema := `
-	CREATE TABLE IF NOT EXISTS candidates (
+	CREATE TABLE IF NOT EXISTS clusters (
 		id              SERIAL PRIMARY KEY,
-		arxiv_id        TEXT NOT NULL,
-		title           TEXT,
-		discovered_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-		status          TEXT DEFAULT 'pending',
+		problem_space   TEXT NOT NULL,
+		paper_ids       TEXT NOT NULL,
 		score           FLOAT DEFAULT 0,
+		status          TEXT DEFAULT 'pending',
 		research_json   TEXT,
 		spec_json       TEXT,
+		created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		delivered_at    TIMESTAMP
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_candidates_arxiv_id ON candidates(arxiv_id);
-	CREATE INDEX IF NOT EXISTS idx_candidates_status ON candidates(status);
+	CREATE INDEX IF NOT EXISTS idx_clusters_status ON clusters(status);
+	CREATE INDEX IF NOT EXISTS idx_clusters_problem_space ON clusters(problem_space);
 
 	CREATE TABLE IF NOT EXISTS shipped_ideas (
 		name        TEXT PRIMARY KEY,
-		arxiv_id    TEXT,
+		cluster_id  INTEGER,
 		shipped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	`
@@ -71,110 +71,97 @@ func (db *DB) ensureSchema() error {
 	return err
 }
 
-// InsertCandidate adds a new candidate paper to the database. Returns the new ID.
-func (db *DB) InsertCandidate(arxivID, title string, score float64) (int, error) {
-	// Skip if already exists
+// InsertCluster adds a new paper cluster to the database. Returns the new ID.
+func (db *DB) InsertCluster(problemSpace string, paperIDs []string, score float64) (int, error) {
+	idsJSON, err := json.Marshal(paperIDs)
+	if err != nil {
+		return 0, fmt.Errorf("marshaling paper IDs: %w", err)
+	}
+
+	// Skip if cluster with same problem space already exists and is pending
 	var existing int
-	err := db.conn.QueryRow("SELECT id FROM candidates WHERE arxiv_id = $1", arxivID).Scan(&existing)
+	err = db.conn.QueryRow(
+		"SELECT id FROM clusters WHERE problem_space = $1 AND status = 'pending'",
+		problemSpace,
+	).Scan(&existing)
 	if err == nil {
-		return existing, nil // already tracked
+		return existing, nil
 	}
 
 	var id int
 	err = db.conn.QueryRow(
-		"INSERT INTO candidates (arxiv_id, title, score) VALUES ($1, $2, $3) RETURNING id",
-		arxivID, title, score,
+		"INSERT INTO clusters (problem_space, paper_ids, score) VALUES ($1, $2, $3) RETURNING id",
+		problemSpace, string(idsJSON), score,
 	).Scan(&id)
 	if err != nil {
-		return 0, fmt.Errorf("inserting candidate %s: %w", arxivID, err)
+		return 0, fmt.Errorf("inserting cluster '%s': %w", problemSpace, err)
 	}
 	return id, nil
 }
 
-// UpdateStatus sets the status of a candidate.
-func (db *DB) UpdateStatus(arxivID, status string) error {
-	_, err := db.conn.Exec("UPDATE candidates SET status = $1 WHERE arxiv_id = $2", status, arxivID)
+// UpdateClusterStatus sets the status of a cluster.
+func (db *DB) UpdateClusterStatus(id int, status string) error {
+	_, err := db.conn.Exec("UPDATE clusters SET status = $1 WHERE id = $2", status, id)
 	return err
 }
 
-// SaveResearch stores the research context JSON for a candidate.
-func (db *DB) SaveResearch(arxivID string, research *types.ResearchContext) error {
-	data, err := json.Marshal(research)
-	if err != nil {
-		return fmt.Errorf("marshaling research: %w", err)
-	}
-	_, err = db.conn.Exec(
-		"UPDATE candidates SET research_json = $1, status = 'researching' WHERE arxiv_id = $2",
-		string(data), arxivID,
+// SaveClusterResearch stores the research context JSON for a cluster.
+func (db *DB) SaveClusterResearch(id int, researchJSON string) error {
+	_, err := db.conn.Exec(
+		"UPDATE clusters SET research_json = $1, status = 'researching' WHERE id = $2",
+		researchJSON, id,
 	)
 	return err
 }
 
-// SaveSpec stores the generated product spec JSON for a candidate.
-func (db *DB) SaveSpec(arxivID string, spec *types.ProductSpec) error {
+// SaveClusterSpec stores the generated product spec JSON for a cluster.
+func (db *DB) SaveClusterSpec(id int, spec *types.ProductSpec) error {
 	data, err := json.Marshal(spec)
 	if err != nil {
 		return fmt.Errorf("marshaling spec: %w", err)
 	}
 	_, err = db.conn.Exec(
-		"UPDATE candidates SET spec_json = $1, status = 'synthesized' WHERE arxiv_id = $2",
-		string(data), arxivID,
+		"UPDATE clusters SET spec_json = $1, status = 'synthesized' WHERE id = $2",
+		string(data), id,
 	)
 	return err
 }
 
-// MarkDelivered marks a candidate as delivered and records the timestamp.
-func (db *DB) MarkDelivered(arxivID string) error {
+// MarkClusterDelivered marks a cluster as delivered and records the timestamp.
+func (db *DB) MarkClusterDelivered(id int) error {
 	_, err := db.conn.Exec(
-		"UPDATE candidates SET status = 'delivered', delivered_at = CURRENT_TIMESTAMP WHERE arxiv_id = $1",
-		arxivID,
+		"UPDATE clusters SET status = 'delivered', delivered_at = CURRENT_TIMESTAMP WHERE id = $1",
+		id,
 	)
 	return err
 }
 
-// MarkSkipped marks a candidate as skipped (failed quality gate or error).
-func (db *DB) MarkSkipped(arxivID string) error {
+// MarkClusterSkipped marks a cluster as skipped.
+func (db *DB) MarkClusterSkipped(id int) error {
 	_, err := db.conn.Exec(
-		"UPDATE candidates SET status = 'skipped' WHERE arxiv_id = $1",
-		arxivID,
+		"UPDATE clusters SET status = 'skipped' WHERE id = $1",
+		id,
 	)
 	return err
 }
 
-// GetCandidatesByStatus returns candidates matching the given status, ordered by score descending.
-func (db *DB) GetCandidatesByStatus(status string, limit int) ([]types.Candidate, error) {
-	rows, err := db.conn.Query(
-		"SELECT id, arxiv_id, title, status, score, discovered_at FROM candidates WHERE status = $1 ORDER BY score DESC LIMIT $2",
-		status, limit,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var candidates []types.Candidate
-	for rows.Next() {
-		var c types.Candidate
-		if err := rows.Scan(&c.ID, &c.ArxivID, &c.Title, &c.Status, &c.Score, &c.DiscoveredAt); err != nil {
-			return nil, err
-		}
-		candidates = append(candidates, c)
-	}
-	return candidates, rows.Err()
-}
-
-// GetCandidate returns a single candidate by arxiv ID, including research and spec JSON.
-func (db *DB) GetCandidate(arxivID string) (*types.Candidate, error) {
-	var c types.Candidate
+// GetCluster returns a single cluster by ID, including research and spec JSON.
+func (db *DB) GetCluster(id int) (*types.PaperCluster, error) {
+	var c types.PaperCluster
+	var paperIDsJSON string
 	var researchJSON, specJSON sql.NullString
 	var deliveredAt sql.NullTime
 
 	err := db.conn.QueryRow(
-		"SELECT id, arxiv_id, title, status, score, research_json, spec_json, discovered_at, delivered_at FROM candidates WHERE arxiv_id = $1",
-		arxivID,
-	).Scan(&c.ID, &c.ArxivID, &c.Title, &c.Status, &c.Score, &researchJSON, &specJSON, &c.DiscoveredAt, &deliveredAt)
+		"SELECT id, problem_space, paper_ids, score, status, research_json, spec_json, created_at, delivered_at FROM clusters WHERE id = $1",
+		id,
+	).Scan(&c.ID, &c.ProblemSpace, &paperIDsJSON, &c.Score, &c.Status, &researchJSON, &specJSON, &c.CreatedAt, &deliveredAt)
 	if err != nil {
 		return nil, err
+	}
+
+	if err := json.Unmarshal([]byte(paperIDsJSON), &c.PaperIDs); err != nil {
+		return nil, fmt.Errorf("parsing paper IDs: %w", err)
 	}
 
 	if researchJSON.Valid {
@@ -190,10 +177,10 @@ func (db *DB) GetCandidate(arxivID string) (*types.Candidate, error) {
 	return &c, nil
 }
 
-// GetSynthesizedSpecs returns all candidates with status 'synthesized' that have specs ready for delivery.
-func (db *DB) GetSynthesizedSpecs(limit int) ([]types.Candidate, error) {
+// GetSynthesizedClusters returns all clusters with status 'synthesized' that have specs ready for delivery.
+func (db *DB) GetSynthesizedClusters(limit int) ([]types.PaperCluster, error) {
 	rows, err := db.conn.Query(
-		"SELECT id, arxiv_id, title, status, score, spec_json, discovered_at FROM candidates WHERE status = 'synthesized' AND spec_json IS NOT NULL ORDER BY score DESC LIMIT $1",
+		"SELECT id, problem_space, paper_ids, score, status, spec_json, created_at FROM clusters WHERE status = 'synthesized' AND spec_json IS NOT NULL ORDER BY score DESC LIMIT $1",
 		limit,
 	)
 	if err != nil {
@@ -201,26 +188,30 @@ func (db *DB) GetSynthesizedSpecs(limit int) ([]types.Candidate, error) {
 	}
 	defer rows.Close()
 
-	var candidates []types.Candidate
+	var clusters []types.PaperCluster
 	for rows.Next() {
-		var c types.Candidate
+		var c types.PaperCluster
+		var paperIDsJSON string
 		var specJSON sql.NullString
-		if err := rows.Scan(&c.ID, &c.ArxivID, &c.Title, &c.Status, &c.Score, &specJSON, &c.DiscoveredAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.ProblemSpace, &paperIDsJSON, &c.Score, &c.Status, &specJSON, &c.CreatedAt); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal([]byte(paperIDsJSON), &c.PaperIDs); err != nil {
+			continue
 		}
 		if specJSON.Valid {
 			c.SpecJSON = specJSON.String
 		}
-		candidates = append(candidates, c)
+		clusters = append(clusters, c)
 	}
-	return candidates, rows.Err()
+	return clusters, rows.Err()
 }
 
 // RecordShippedIdea tracks a product name as shipped to prevent duplicates.
-func (db *DB) RecordShippedIdea(name, arxivID string) error {
+func (db *DB) RecordShippedIdea(name string, clusterID int) error {
 	_, err := db.conn.Exec(
-		"INSERT INTO shipped_ideas (name, arxiv_id) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
-		name, arxivID,
+		"INSERT INTO shipped_ideas (name, cluster_id) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING",
+		name, clusterID,
 	)
 	return err
 }
@@ -236,7 +227,7 @@ func (db *DB) IsIdeaShipped(name string) (bool, error) {
 func (db *DB) Stats() (*types.Stats, error) {
 	s := &types.Stats{}
 
-	err := db.conn.QueryRow("SELECT COUNT(*) FROM candidates").Scan(&s.TotalCandidates)
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM clusters").Scan(&s.TotalClusters)
 	if err != nil {
 		return nil, err
 	}
@@ -251,7 +242,7 @@ func (db *DB) Stats() (*types.Stats, error) {
 		{"delivered", &s.Delivered},
 		{"skipped", &s.Skipped},
 	} {
-		err := db.conn.QueryRow("SELECT COUNT(*) FROM candidates WHERE status = $1", status.name).Scan(status.dest)
+		err := db.conn.QueryRow("SELECT COUNT(*) FROM clusters WHERE status = $1", status.name).Scan(status.dest)
 		if err != nil {
 			return nil, err
 		}
@@ -262,7 +253,7 @@ func (db *DB) Stats() (*types.Stats, error) {
 		return nil, err
 	}
 
-	err = db.conn.QueryRow("SELECT COALESCE(AVG(score), 0) FROM candidates WHERE score > 0").Scan(&s.AvgScore)
+	err = db.conn.QueryRow("SELECT COALESCE(AVG(score), 0) FROM clusters WHERE score > 0").Scan(&s.AvgScore)
 	if err != nil {
 		return nil, err
 	}
@@ -270,19 +261,19 @@ func (db *DB) Stats() (*types.Stats, error) {
 	return s, nil
 }
 
-// ListCandidates returns recent candidates with optional status filter.
-func (db *DB) ListCandidates(status string, limit int) ([]types.Candidate, error) {
+// ListClusters returns recent clusters with optional status filter.
+func (db *DB) ListClusters(status string, limit int) ([]types.PaperCluster, error) {
 	var rows *sql.Rows
 	var err error
 
 	if status != "" {
 		rows, err = db.conn.Query(
-			"SELECT id, arxiv_id, title, status, score, discovered_at FROM candidates WHERE status = $1 ORDER BY discovered_at DESC LIMIT $2",
+			"SELECT id, problem_space, paper_ids, score, status, created_at FROM clusters WHERE status = $1 ORDER BY created_at DESC LIMIT $2",
 			status, limit,
 		)
 	} else {
 		rows, err = db.conn.Query(
-			"SELECT id, arxiv_id, title, status, score, discovered_at FROM candidates ORDER BY discovered_at DESC LIMIT $1",
+			"SELECT id, problem_space, paper_ids, score, status, created_at FROM clusters ORDER BY created_at DESC LIMIT $1",
 			limit,
 		)
 	}
@@ -291,13 +282,17 @@ func (db *DB) ListCandidates(status string, limit int) ([]types.Candidate, error
 	}
 	defer rows.Close()
 
-	var candidates []types.Candidate
+	var clusters []types.PaperCluster
 	for rows.Next() {
-		var c types.Candidate
-		if err := rows.Scan(&c.ID, &c.ArxivID, &c.Title, &c.Status, &c.Score, &c.DiscoveredAt); err != nil {
+		var c types.PaperCluster
+		var paperIDsJSON string
+		if err := rows.Scan(&c.ID, &c.ProblemSpace, &paperIDsJSON, &c.Score, &c.Status, &c.CreatedAt); err != nil {
 			return nil, err
 		}
-		candidates = append(candidates, c)
+		if err := json.Unmarshal([]byte(paperIDsJSON), &c.PaperIDs); err != nil {
+			continue
+		}
+		clusters = append(clusters, c)
 	}
-	return candidates, rows.Err()
+	return clusters, rows.Err()
 }

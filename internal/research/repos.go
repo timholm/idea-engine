@@ -19,7 +19,7 @@ import (
 
 const maxRelatedRepos = 7
 
-// RepoResearcher finds related GitHub repos for a candidate paper.
+// RepoResearcher finds related GitHub repos for a problem space and its techniques.
 type RepoResearcher struct {
 	cfg    *config.Config
 	client *http.Client
@@ -35,17 +35,18 @@ func NewRepoResearcher(cfg *config.Config) *RepoResearcher {
 	}
 }
 
-// FindRelatedRepos finds the top 7 GitHub repos related to a candidate paper.
-func (rr *RepoResearcher) FindRelatedRepos(title, abstract, fullText string) ([]types.RepoSummary, error) {
+// FindRelatedRepos finds the top 7 GitHub repos related to the PROBLEM SPACE
+// and the techniques from the 7 cluster papers.
+func (rr *RepoResearcher) FindRelatedRepos(problemSpace string, techniques []types.TechniqueSummary) ([]types.RepoSummary, error) {
 	seen := make(map[string]bool)
 	var scored []scoredRepo
 
-	// Strategy 1: Search by paper title keywords
-	titleQuery := extractSearchQuery(title)
-	if titleQuery != "" {
-		repos, err := rr.searchGitHub(titleQuery)
+	// Strategy 1: Search by problem space name directly
+	spaceQuery := extractSearchQuery(problemSpace)
+	if spaceQuery != "" {
+		repos, err := rr.searchGitHub(spaceQuery)
 		if err != nil {
-			log.Printf("[research/repos] warning: title search failed: %v", err)
+			log.Printf("[research/repos] warning: problem space search failed: %v", err)
 		} else {
 			for _, r := range repos {
 				if seen[r.HTMLURL] {
@@ -57,12 +58,18 @@ func (rr *RepoResearcher) FindRelatedRepos(title, abstract, fullText string) ([]
 		}
 	}
 
-	// Strategy 2: Search by technique name (extracted from abstract)
-	techniques := extractTechniques(abstract)
-	for _, tech := range techniques {
-		repos, err := rr.searchGitHub(tech)
+	// Strategy 2: Search by each paper's technique keywords (diversifies repo results)
+	for i, tech := range techniques {
+		if i >= 4 { // limit to 4 technique searches to avoid rate limiting
+			break
+		}
+		query := extractSearchQuery(tech.Title)
+		if query == "" {
+			continue
+		}
+		repos, err := rr.searchGitHub(query)
 		if err != nil {
-			log.Printf("[research/repos] warning: technique search '%s' failed: %v", tech, err)
+			log.Printf("[research/repos] warning: technique search '%s' failed: %v", query, err)
 			continue
 		}
 		for _, r := range repos {
@@ -74,21 +81,22 @@ func (rr *RepoResearcher) FindRelatedRepos(title, abstract, fullText string) ([]
 		}
 	}
 
-	// Strategy 3: Extract GitHub URLs mentioned in the paper text
-	if fullText != "" {
-		urls := extractGitHubURLs(fullText)
-		for _, ghURL := range urls {
-			if seen[ghURL] {
-				continue
-			}
-			seen[ghURL] = true
-			// Fetch repo details from the URL
-			repo, err := rr.fetchRepo(ghURL)
+	// Strategy 3: Search by technique names extracted from abstracts
+	for _, tech := range techniques {
+		names := extractTechniques(tech.Abstract)
+		for _, name := range names {
+			repos, err := rr.searchGitHub(name)
 			if err != nil {
-				log.Printf("[research/repos] warning: failed to fetch %s: %v", ghURL, err)
+				log.Printf("[research/repos] warning: technique name search '%s' failed: %v", name, err)
 				continue
 			}
-			scored = append(scored, scoredRepo{repo: *repo, relevance: 1.0}) // directly cited = highest relevance
+			for _, r := range repos {
+				if seen[r.HTMLURL] {
+					continue
+				}
+				seen[r.HTMLURL] = true
+				scored = append(scored, scoredRepo{repo: r, relevance: 0.8})
+			}
 		}
 	}
 
@@ -156,7 +164,8 @@ func (rr *RepoResearcher) FindRelatedRepos(title, abstract, fullText string) ([]
 		results = append(results, summary)
 	}
 
-	log.Printf("[research/repos] found %d related repos (from %d candidates, %d after filter)", len(results), len(scored), len(filtered))
+	log.Printf("[research/repos] found %d related repos for problem space '%s' (from %d candidates, %d after filter)",
+		len(results), problemSpace, len(scored), len(filtered))
 	return results, nil
 }
 
@@ -192,40 +201,6 @@ func (rr *RepoResearcher) searchGitHub(query string) ([]types.GitHubRepo, error)
 		return nil, fmt.Errorf("decoding GitHub search: %w", err)
 	}
 	return result.Items, nil
-}
-
-func (rr *RepoResearcher) fetchRepo(htmlURL string) (*types.GitHubRepo, error) {
-	// Extract owner/repo from URL: https://github.com/owner/repo
-	parts := strings.Split(strings.TrimPrefix(htmlURL, "https://github.com/"), "/")
-	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid GitHub URL: %s", htmlURL)
-	}
-	owner, repo := parts[0], parts[1]
-
-	u := fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo)
-	req, err := http.NewRequest("GET", u, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "token "+rr.cfg.GitHubToken)
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-
-	resp, err := rr.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching repo %s/%s: %w", owner, repo, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub repo %s/%s returned %d: %s", owner, repo, resp.StatusCode, string(body))
-	}
-
-	var ghRepo types.GitHubRepo
-	if err := json.NewDecoder(resp.Body).Decode(&ghRepo); err != nil {
-		return nil, err
-	}
-	return &ghRepo, nil
 }
 
 func (rr *RepoResearcher) fetchREADME(fullName string) (string, error) {
@@ -369,33 +344,11 @@ func extractTechniques(abstract string) []string {
 	return techniques
 }
 
-// extractGitHubURLs finds GitHub repository URLs in text.
-func extractGitHubURLs(text string) []string {
-	re := regexp.MustCompile(`https?://github\.com/([a-zA-Z0-9\-]+/[a-zA-Z0-9\-_.]+)`)
-	matches := re.FindAllStringSubmatch(text, -1)
-
-	seen := make(map[string]bool)
-	var urls []string
-	for _, m := range matches {
-		fullURL := "https://github.com/" + m[1]
-		// Strip trailing punctuation or .git
-		fullURL = strings.TrimSuffix(fullURL, ".git")
-		fullURL = strings.TrimSuffix(fullURL, ".")
-		if !seen[fullURL] {
-			seen[fullURL] = true
-			urls = append(urls, fullURL)
-		}
-	}
-	return urls
-}
-
 // normalizeStars converts star count to a 0-1 score. Uses log scale.
 func normalizeStars(stars int) float64 {
 	if stars <= 0 {
 		return 0
 	}
-	// log10(10) = 1, log10(100) = 2, log10(1000) = 3, log10(10000) = 4
-	// Normalize to 0-0.5 range
 	score := 0.0
 	switch {
 	case stars >= 10000:
